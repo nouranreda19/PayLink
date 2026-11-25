@@ -1,0 +1,180 @@
+erDiagram
+    USERS ||--|| WALLETS : owns
+    USERS ||--o| AGENTS : "may be"
+    USERS ||--o{ AUDIT_LOGS : performs
+    USERS ||--o{ SYSTEM_CONFIG : updates
+    WALLETS ||--o{ LEDGER_ENTRIES : records
+    BILLERS ||--|{ BILL_SERVICES : offers
+    BILLERS ||--o{ PROMOTIONS : runs
+    BILLERS ||--o{ SETTLEMENT_FILES : sends
+    BILL_SERVICES ||--o{ BILL_SERVICE_FEE_TIERS : "has tiers"
+    BILL_SERVICES ||--o{ PAYMENTS : "billed via"
+    USERS ||--o{ PAYMENTS : initiates
+    AGENTS ||--o{ PAYMENTS : "processes for"
+    PAYMENTS ||--o{ LEDGER_ENTRIES : generates
+    PAYMENTS ||--o{ PAYMENT_STATE_HISTORY : transitions
+    PAYMENTS ||--o{ BILLER_CALLBACKS : receives
+    PAYMENTS ||--o{ NOTIFICATIONS : triggers
+    SETTLEMENT_FILES ||--o{ RECONCILIATION_ITEMS : produces
+    PAYMENTS |o--o{ RECONCILIATION_ITEMS : "compared in"
+
+    USERS {
+        uuid id PK
+        string role "CUSTOMER, AGENT, ADMIN, SUPPORT, SYSTEM"
+        string name
+        string email UK
+        string phone UK
+        string national_id UK "nullable, customers only (Customer.nationalId)"
+        string verification_level "BASIC or VERIFIED"
+        string account_status "ACTIVE or BLOCKED"
+        timestamp blocked_until
+        timestamp created_at
+    }
+
+    AGENTS {
+        uuid user_id PK,FK "same value as users.id"
+        string terminal_code UK
+        decimal commission_rate "0.40, default from SYSTEM_CONFIG"
+        timestamp created_at
+    }
+
+    WALLETS {
+        uuid id PK
+        uuid owner_id FK,UK "one wallet per user"
+        string currency "EGP"
+        int version "optimistic lock"
+        timestamp updated_at
+    }
+
+    LEDGER_ENTRIES {
+        uuid id PK
+        uuid wallet_id FK
+        uuid payment_id FK "nullable; UK(payment_id, wallet_id, entry_type) when set"
+        string entry_type "TOP_UP, HOLD, CAPTURE, RELEASE, REFUND, FEE_INCOME, COMMISSION"
+        decimal amount "numeric(19,2), stored positive, never float"
+        timestamp created_at
+    }
+
+    BILLERS {
+        uuid id PK
+        string code UK "ELECTROCO, AQUACO, TOPUPNET, NETCO"
+        string name
+        string protocol
+        boolean is_active
+        timestamp created_at
+    }
+
+    BILL_SERVICES {
+        uuid id PK
+        uuid biller_id FK
+        string name
+        json required_fields "list of field names, e.g. meter_number"
+        decimal min_amount "5.00"
+        decimal max_amount "10000.00"
+        string fee_type "FIXED, PERCENTAGE, TIERED"
+        decimal fee_value "fixed amount or percentage rate"
+        decimal min_fee "e.g. 1.00 for top-up"
+        boolean is_active
+    }
+
+    BILL_SERVICE_FEE_TIERS {
+        uuid id PK
+        uuid service_id FK
+        decimal up_to_amount "nullable = no upper limit"
+        decimal fee_amount "2.00 up to 200, 4.00 above"
+    }
+
+    PROMOTIONS {
+        uuid id PK
+        uuid biller_id FK
+        timestamp start_at
+        timestamp end_at
+        boolean is_active "waives service fee for biller during active window"
+    }
+
+    SYSTEM_CONFIG {
+        string key PK "DAILY_LIMIT_BASIC, VELOCITY_MAX, AGENT_COMMISSION_RATE, ..."
+        string value
+        uuid updated_by FK "nullable"
+        timestamp updated_at
+    }
+
+    PAYMENTS {
+        uuid id PK
+        string idempotency_key UK "UK together with customer_id"
+        string biller_reference "biller payment/receipt reference"
+        uuid customer_id FK,UK "UK together with idempotency_key"
+        uuid agent_id FK "nullable, agents.user_id"
+        uuid service_id FK
+        json input_values "meter number or phone number"
+        decimal bill_amount
+        decimal fee_amount
+        decimal total_amount
+        string state "Initiated, FundsHeld, SentToBiller, Completed, Failed, Unknown, Refunded, Rejected"
+        string failure_reason "nullable"
+        int retry_count
+        timestamp next_retry_at "nullable"
+        timestamp created_at
+        timestamp updated_at
+    }
+
+    PAYMENT_STATE_HISTORY {
+        uuid id PK
+        uuid payment_id FK
+        string from_state
+        string to_state
+        string reason
+        timestamp occurred_at
+    }
+
+    BILLER_CALLBACKS {
+        uuid id PK
+        uuid payment_id FK
+        string external_event_id UK
+        string payload
+        boolean processed
+        timestamp received_at
+    }
+
+    NOTIFICATIONS {
+        uuid id PK
+        uuid payment_id FK
+        string channel "SMS, EMAIL, PUSH"
+        string recipient
+        string status "PENDING, SENT, FAILED, UNDELIVERED"
+        int attempt_count "max 3 retries"
+        timestamp updated_at
+    }
+
+    SETTLEMENT_FILES {
+        uuid id PK
+        uuid biller_id FK
+        date settlement_date "UK together with biller_id"
+        string file_name
+        timestamp received_at
+    }
+
+    RECONCILIATION_ITEMS {
+        uuid id PK
+        uuid settlement_file_id FK
+        uuid payment_id FK "nullable, null if missing in PayLink"
+        string biller_reference
+        decimal biller_amount "nullable"
+        decimal paylink_amount "nullable"
+        string paylink_state "nullable"
+        string difference_type "MATCHED, MISSING_IN_PAYLINK, MISSING_IN_SETTLEMENT, STATE_MISMATCH, AMOUNT_MISMATCH"
+        boolean reviewed "support review"
+        string review_note
+        timestamp created_at
+    }
+
+    AUDIT_LOGS {
+        uuid id PK
+        uuid actor_id FK "nullable, null = system action"
+        string action
+        string entity_type
+        uuid entity_id
+        string reason
+        string details "before/after values or amount"
+        timestamp occurred_at
+    }

@@ -1,0 +1,296 @@
+classDiagram
+    direction TB
+
+    class UserRole {
+        <<enumeration>>
+        CUSTOMER
+        AGENT
+        ADMIN
+        SUPPORT
+        SYSTEM
+    }
+
+    class VerificationLevel {
+        <<enumeration>>
+        BASIC
+        VERIFIED
+    }
+
+    class AccountStatus {
+        <<enumeration>>
+        ACTIVE
+        BLOCKED
+    }
+
+    class PaymentState {
+        <<enumeration>>
+        Initiated
+        FundsHeld
+        SentToBiller
+        Completed
+        Failed
+        Unknown
+        Refunded
+        Rejected
+    }
+
+    class LedgerEntryType {
+        <<enumeration>>
+        TOP_UP
+        HOLD
+        CAPTURE
+        RELEASE
+        REFUND
+        FEE_INCOME
+        COMMISSION
+    }
+
+    class FeeType {
+        <<enumeration>>
+        FIXED
+        PERCENTAGE
+        TIERED
+    }
+
+    class NotificationChannel {
+        <<enumeration>>
+        SMS
+        EMAIL
+        PUSH
+    }
+
+    class NotificationStatus {
+        <<enumeration>>
+        PENDING
+        SENT
+        FAILED
+        UNDELIVERED
+    }
+
+    class DifferenceType {
+        <<enumeration>>
+        MATCHED
+        MISSING_IN_PAYLINK
+        MISSING_IN_SETTLEMENT
+        STATE_MISMATCH
+        AMOUNT_MISMATCH
+    }
+
+    class User {
+        +UUID id
+        +UserRole role
+        +String name
+        +String email
+        +String phone
+        +VerificationLevel verificationLevel
+        +AccountStatus accountStatus
+        +DateTime blockedUntil
+        +DateTime createdAt
+        +isBlocked(DateTime now) bool
+        +dailyLimitEgp() Decimal
+    }
+
+    class Customer {
+        +String nationalId
+        +canPayAmount(Decimal amount, Decimal spentTodayEgp) bool
+    }
+
+    class Agent {
+        +String terminalCode
+        +Decimal commissionRate
+        +DateTime createdAt
+    }
+
+    class Wallet {
+        +UUID id
+        +UUID ownerId
+        +String currency
+        +int version
+        +DateTime updatedAt
+        +getAvailableBalance(List~LedgerEntry~ entries) Decimal
+        +getHeldBalance(List~LedgerEntry~ entries) Decimal
+        +getTotalBalance(List~LedgerEntry~ entries) Decimal
+    }
+
+    class LedgerEntry {
+        +UUID id
+        +UUID walletId
+        +UUID paymentId
+        +LedgerEntryType entryType
+        +Decimal amount
+        +DateTime createdAt
+    }
+
+    class Biller {
+        +UUID id
+        +String code
+        +String name
+        +String protocol
+        +bool isActive
+        +DateTime createdAt
+        +activate() void
+        +disable() void
+    }
+
+    class BillService {
+        +UUID id
+        +UUID billerId
+        +String name
+        +List~String~ requiredFields
+        +Decimal minAmount
+        +Decimal maxAmount
+        +FeeType feeType
+        +Decimal feeValue
+        +Decimal minFee
+        +bool isActive
+        +validateAmount(Decimal amount) bool
+    }
+
+    class FeeTier {
+        +UUID id
+        +UUID serviceId
+        +Decimal upToAmount
+        +Decimal feeAmount
+    }
+
+    class Promotion {
+        +UUID id
+        +UUID billerId
+        +DateTime startAt
+        +DateTime endAt
+        +bool isActive
+        +appliesOn(DateTime timestamp) bool
+    }
+
+    class FeeCalculator {
+        +calculateServiceFee(BillService service, Decimal billAmount, Promotion promo, DateTime now) Decimal
+        +calculateAgentCommission(Agent agent, Decimal serviceFee) Decimal
+    }
+
+    class SystemConfig {
+        +String key
+        +String value
+        +UUID updatedBy
+        +DateTime updatedAt
+        +getDecimal() Decimal
+        +getInt() int
+    }
+
+    class Payment {
+        +UUID id
+        +String idempotencyKey
+        +String billerReference
+        +UUID customerId
+        +UUID agentId
+        +UUID serviceId
+        +Map~String,String~ inputValues
+        +Decimal billAmount
+        +Decimal feeAmount
+        +Decimal totalAmount
+        +PaymentState state
+        +String failureReason
+        +int retryCount
+        +DateTime nextRetryAt
+        +DateTime createdAt
+        +DateTime updatedAt
+        +holdFunds() void
+        +markSentToBiller() void
+        +complete() void
+        +fail(String reason) void
+        +markUnknown() void
+        +refund() void
+        +reject(String reason) void
+    }
+
+    class PaymentStateHistory {
+        +UUID id
+        +UUID paymentId
+        +PaymentState fromState
+        +PaymentState toState
+        +String reason
+        +DateTime occurredAt
+    }
+
+    class BillerCallback {
+        +UUID id
+        +UUID paymentId
+        +String externalEventId
+        +String payload
+        +bool processed
+        +DateTime receivedAt
+    }
+
+    class Notification {
+        +UUID id
+        +UUID paymentId
+        +NotificationChannel channel
+        +String recipient
+        +NotificationStatus status
+        +int attemptCount
+        +DateTime updatedAt
+        +recordAttempt(bool success) void
+    }
+
+    class SettlementFile {
+        +UUID id
+        +UUID billerId
+        +Date settlementDate
+        +String fileName
+        +DateTime receivedAt
+    }
+
+    class ReconciliationItem {
+        +UUID id
+        +UUID settlementFileId
+        +UUID paymentId
+        +String billerReference
+        +Decimal billerAmount
+        +Decimal paylinkAmount
+        +String paylinkState
+        +DifferenceType differenceType
+        +bool reviewed
+        +String reviewNote
+        +DateTime createdAt
+    }
+
+    class AuditLog {
+        +UUID id
+        +UUID actorId
+        +String action
+        +String entityType
+        +UUID entityId
+        +String reason
+        +String details
+        +DateTime occurredAt
+    }
+
+    User <|-- Customer
+    User <|-- Agent
+    User "1" --> "1" Wallet : owns
+    Wallet "1" --> "0..*" LedgerEntry : records
+    Customer "1" --> "0..*" Payment : initiates
+    Agent "0..1" --> "0..*" Payment : processes on behalf of
+    Biller "1" --> "1..*" BillService : offers
+    Biller "1" --> "0..*" Promotion : runs
+    BillService "1" --> "0..*" FeeTier : has tiers
+    BillService "1" --> "0..*" Payment : billed via
+    FeeCalculator ..> BillService : reads
+    FeeCalculator ..> FeeTier : reads
+    FeeCalculator ..> Promotion : checks
+    FeeCalculator ..> Agent : reads rate
+    SystemConfig ..> User : updated by
+    Payment "1" --> "0..*" LedgerEntry : generates
+    Payment "1" --> "0..*" PaymentStateHistory : transitions
+    Payment "1" --> "0..*" BillerCallback : receives
+    Payment "1" --> "0..*" Notification : triggers
+    Biller "1" --> "0..*" SettlementFile : sends
+    SettlementFile "1" --> "0..*" ReconciliationItem : produces
+    ReconciliationItem "0..*" --> "0..1" Payment : compares with
+    User "0..1" --> "0..*" AuditLog : performs
+
+    note for User "role CUSTOMER / AGENT / ADMIN / SUPPORT / SYSTEM.\nAdmin and Support are roles, not separate tables.\nThe SYSTEM user is seeded and owns PayLink's own wallet (fee income).\nCustomer.nationalId maps to users.national_id (customers only); daily limit is resolved per user/customer."
+    note for Wallet "Balances are computed from LedgerEntry (never overwritten); exact Decimal.\nAvailable = TOP_UP + RELEASE + REFUND + FEE_INCOME + COMMISSION - HOLD\nHeld = HOLD - CAPTURE - RELEASE\nAmounts are stored positive; the entry type gives the sign.\nversion = optimistic lock (hard case 4)."
+    note for LedgerEntry "Unique (payment_id, wallet_id, entry_type) when payment_id is set,\nso a payment cannot be captured or refunded twice.\nFEE_INCOME = service fee minus commission (SYSTEM wallet).\nCOMMISSION = agent share (agent wallet)."
+    note for Agent "Agent id = User id (agents.user_id is the PK).\ncommissionRate defaults from config AGENT_COMMISSION_RATE (0.40).\nFeeCalculator is the only place that computes commission."
+    note for Payment "State transitions follow Section 2.5;\nno auto-refund while state is Unknown.\nUnique (customerId, idempotencyKey).\ninputValues holds the meter or phone number sent to the biller."
+    note for SystemConfig "Limits, fees, velocity, retry and commission values.\nEditable at runtime without redeploying (FR-24)."
