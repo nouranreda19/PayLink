@@ -1,0 +1,93 @@
+@startuml
+left to right direction
+
+skinparam backgroundColor white
+skinparam shadowing false
+skinparam linetype ortho
+skinparam packageStyle rectangle
+skinparam nodesep 45
+skinparam ranksep 55
+skinparam actorStyle awesome
+skinparam usecase {
+  BackgroundColor #EAF3FF
+  BorderColor #3973AC
+  FontColor #183153
+}
+skinparam rectangle {
+  BorderColor #3973AC
+  FontColor #183153
+}
+
+actor Customer
+actor Agent
+actor Admin
+actor "Support Employee" as Support
+actor Biller
+actor "Notification Provider" as Notification
+
+rectangle "PayLink System" {
+
+  package "Customer Services" {
+    usecase "Register Account" as UC1
+    usecase "View Wallet Balance\nand Transaction History" as UC2
+    usecase "Top Up Wallet" as UC3
+    usecase "Browse Billers\nand Services" as UC4
+    usecase "Pay Bill" as UC5
+    usecase "Request Refund" as UC6
+  }
+
+  package "Agent Services" {
+    usecase "Pay on Behalf\nof Customer" as UC7
+    usecase "Receive Commission" as UC8
+  }
+
+  package "Administration" {
+    usecase "Upgrade Customer" as UC9
+    usecase "Manage Billers\nand Services" as UC10
+    usecase "Edit Fees and Limits" as UC11
+    usecase "View Daily Totals" as UC12
+  }
+
+  package "Support Services" {
+    usecase "Search Payment\nand View History" as UC13
+    usecase "Block / Unblock Account" as UC14
+    usecase "Approve Refund Request" as UC15
+    usecase "Review Reconciliation Report" as UC16
+  }
+
+  package "External Integrations" {
+    usecase "Process Payment Request" as UC17
+    usecase "Return Payment Result" as UC18
+    usecase "Reconcile Settlement File" as UC19
+    usecase "Deliver SMS and Push\nNotifications" as UC20
+  }
+}
+
+Customer -- UC1
+Customer -- UC2
+Customer -- UC3
+Customer -- UC4
+Customer -- UC5
+Customer -- UC6
+
+Agent -- UC7
+Agent -- UC8
+
+Admin -- UC9
+Admin -- UC10
+Admin -- UC11
+Admin -- UC12
+
+Support -- UC13
+Support -- UC14
+Support -- UC15
+Support -- UC16
+
+Biller -- UC17
+Biller -- UC18
+Biller -- UC19
+
+Notification -- UC20
+
+UC7 ..> UC5 : <<include>>
+@enduml
