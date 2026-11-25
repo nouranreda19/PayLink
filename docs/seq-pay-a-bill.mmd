@@ -2,51 +2,216 @@ sequenceDiagram
     autonumber
     actor Payer as "Customer / Agent"
     participant API as "PaymentController"
+    participant Orch as "PaymentOrchestrator"
+    participant Idem as "IdempotencyService"
+    participant Cat as "CatalogService"
+    participant Fee as "FeeCalculator"
     participant Fraud as "FraudCheckChain"
     participant Wallet as "WalletService"
-    participant Fee as "FeeCalculator"
-    participant Orchestrator as "PaymentOrchestrator"
     participant Biller as "BillerAdapter"
+    participant TN as "TopUpNet (external)"
+    participant CB as "CallbackController"
+    participant Sch as "Scheduler"
+    participant Rec as "ReconciliationService"
     participant Notif as "NotificationService"
     participant Audit as "AuditLog"
 
-    Payer->>API: POST /payments (idempotencyKey, serviceId, accountRef, amount, agentId)
-    API->>Orchestrator: findByIdempotencyKey(idempotencyKey)
+    Note over Payer,Audit: PART 1 - Payment request (US-09 to US-13, US-15, US-18, US-19, US-29)
 
-    alt Duplicate idempotencyKey already exists
-        Orchestrator-->>API: Return stored payment result (no duplicate charge)
-        API-->>Payer: 200 OK / original payment response
+    Payer->>API: POST /payments (idempotencyKey, customerId, serviceId, inputValues, billAmount, agentId optional)
+    Note over Payer,API: customerId is always the customer whose wallet is charged. At an agent terminal the agent supplies the customer and agentId comes from the terminal.
+    API->>Orch: processPayment(request)
+    Orch->>Idem: lookup(customerId, idempotencyKey, requestHash)
+
+    alt Existing idempotencyKey with matching details
+        Idem-->>Orch: existing paymentId
+        Orch-->>API: current state of the original payment (no new hold, no new charge)
+        API-->>Payer: 200 OK current payment status
+    else Existing idempotencyKey with different details
+        Idem-->>Orch: PayloadMismatch
+        Orch-->>API: Refused
+        API-->>Payer: 409 Request refused
     else New payment request
-        Orchestrator->>API: Create payment in state Initiated
-        API->>Fraud: evaluate(payer, serviceId, amount, now)
-        Note over Fraud: Checks: account blocked, over 5 payments in 60s (10m block), 5-10000 EGP bounds, daily limit (5k BASIC / 30k VERIFIED)
+        Orch->>Cat: validate(serviceId, inputValues)
+        Note over Cat: Service and biller must be active. All required fields must be present (meter number, phone number).
 
-        alt Fraud / limit check fails
-            Fraud-->>Orchestrator: Rejected(reason)
-            Orchestrator->>Orchestrator: Transition Initiated -> Rejected
-            Orchestrator->>Audit: record(actor, PAYMENT_REJECTED, reason, now)
-            API-->>Payer: 422 / error with clear reason
-        else Fraud / limit checks pass
-            Fraud-->>Orchestrator: Passed
-            Orchestrator->>Fee: calculateFeeAndTotal(serviceId, amount, agentId, now)
-            Note over Fee: Fixed 2.50, 1.5 percent (min 1 EGP), tiered 2 or 4 EGP, 0 if promo; agent commission is 40 percent of fee
-            Fee-->>Orchestrator: feeAmount, totalAmount, commissionAmount
+        alt Service or biller disabled, or required field missing
+            Cat-->>Orch: Invalid(reason, missing field name)
+            Orch-->>API: Refused (no payment is created)
+            API-->>Payer: 422 Request refused naming the reason
+        else Request is valid
+            Cat-->>Orch: Valid(service, billerAdapter)
 
-            Orchestrator->>Wallet: holdFunds(walletId, paymentId, totalAmount, idempotencyKey)
-            Note over Wallet: Creates HOLD ledger entry; never overwrites balance directly; prevents negative balance under concurrency
+            Orch->>Fee: calculate(serviceId, billAmount, agentId, now)
+            Note over Fee: Fixed 2.50. Percentage 1.5% rounded UP to the next piaster, min 1.00. Tiered 2.00 up to 200, 4.00 above, based on billAmount only. 0.00 if the biller has a promotion active on that Cairo day (start and end day included). Agent commission = 40% of the fee, 0.00 if the fee is 0.
+            Fee-->>Orch: feeAmount, totalAmount, commissionAmount
 
-            alt Insufficient available funds
-                Wallet-->>Orchestrator: InsufficientFunds
-                Orchestrator->>Orchestrator: Transition Initiated -> Rejected
-                Orchestrator->>Audit: record(actor, PAYMENT_REJECTED, Insufficient funds, now)
-                API-->>Payer: 409 / 422 insufficient funds
-            else Funds held
-                Wallet-->>Orchestrator: HoldCreated
-                Orchestrator->>Orchestrator: Transition FundsHeld -> SentToBiller
-                Orchestrator->>Biller: payBill(billerReference, accountRef, amount)
+            Orch->>Orch: Create payment in Initiated (paymentReference, amounts, commissionAmount, cairoDate) and record state history
+            Orch->>Idem: store(customerId, idempotencyKey, requestHash, paymentId)
+            Note over Idem: Unique (customerId, key). If two identical requests race, the second insert fails and is answered as an existing key. Kept for IDEMPOTENCY_RETENTION from config.
 
-                alt Biller confirms payment (within 10s timeout)
-                    Biller-->>Orchestrator: Confirmed(receiptRef)
-                    Orchestrator->>Orchestrator: Transition SentToBiller -> Completed
-                    Orchestrator->>Wallet: captureHoldAndSettle(walletId, paymentId, totalAmount, feeAmount, commissionAmount, agentId)
-                    Note over Wallet: CAPTURE hold, credit FEE_INCOME, and credit COMMISSION
+            rect rgb(235, 245, 255)
+                Note over Orch,Wallet: Critical section: one database transaction holding a lock on the customer wallet. The limit checks and the hold are atomic, so two simultaneous payments cannot both pass.
+                Orch->>Wallet: lock(customerWalletId)
+                Orch->>Fraud: evaluate(customerId, totalAmount, now)
+                Note over Fraud: 1) account blocked? 2) more than 5 accepted payments in a sliding 60s window (Rejected and Failed not counted)? The 6th is rejected and the account is blocked 10 minutes. 3) totalAmount (bill + fee) between 5.00 and 10000.00. 4) Cairo-day total of Completed and held payments + totalAmount within 5000 BASIC or 30000 VERIFIED.
+
+                alt Fraud or limit check fails
+                    Fraud-->>Orch: Rejected(reason)
+                    Orch->>Orch: Transition Initiated -> Rejected (record history)
+                    Orch->>Audit: record(actorId, PAYMENT_REJECTED, reason, now)
+                    Orch-->>API: Rejected(reason)
+                    API-->>Payer: 422 Rejected with clear reason (balances unchanged)
+                else Checks pass
+                    Fraud-->>Orch: Passed
+                    Orch->>Wallet: holdFunds(customerWalletId, paymentId, totalAmount)
+                    Note over Wallet: Writes HOLD ledger entry only if available balance is enough. Available balance never goes below 0.00.
+
+                    alt Insufficient available funds
+                        Wallet-->>Orch: InsufficientFunds
+                        Orch->>Orch: Transition Initiated -> Rejected (record history)
+                        Orch->>Audit: record(actorId, PAYMENT_REJECTED, Insufficient funds, now)
+                        Orch-->>API: Rejected(Insufficient funds)
+                        API-->>Payer: 422 Insufficient funds (no request is sent to the biller)
+                    else Funds held
+                        Wallet-->>Orch: HoldCreated
+                        Orch->>Orch: Transition Initiated -> FundsHeld (record history)
+                        Orch->>Audit: record(actorId, FUNDS_HELD, totalAmount, now)
+                    end
+                end
+                Note over Orch,Wallet: Transaction commits and the wallet lock is released here.
+            end
+
+            opt Funds held (payment is FundsHeld)
+                Orch->>Orch: Transition FundsHeld -> SentToBiller (record history)
+                Orch->>Biller: payBill(paymentReference, serviceId, inputValues, billAmount)
+                Orch->>Orch: Store request and reply in BILLER_EXCHANGES
+                Note over Biller: Each biller keeps its own protocol inside its adapter. Live billers (ElectroCo, AquaCo) have a 10 second timeout. TopUpNet replies Accepted and calls back later.
+
+                alt Biller confirms in the same request (ElectroCo, AquaCo)
+                    Biller-->>Orch: Confirmed(billerReference)
+                    Orch->>Orch: Transition SentToBiller -> Completed (record history)
+                    Orch->>Wallet: captureAndSettle(paymentId, totalAmount, feeAmount, commissionAmount, agentId)
+                    Note over Wallet: Writes CAPTURE for totalAmount. Writes FEE_INCOME = fee - commission to the SYSTEM wallet. If agentId is present, writes COMMISSION to the agent wallet.
+                    Orch->>Audit: record(FUNDS_CAPTURED, FEE_CREDITED, COMMISSION_CREDITED)
+                    Orch->>Notif: sendPaymentResult(customerId, paymentId, COMPLETED)
+                    Note over Notif: One SMS and one Push. Failed sends are retried up to 3 times, then marked UNDELIVERED. Delivery never changes the payment state.
+                    Orch-->>API: Completed
+                    API-->>Payer: 200 OK Completed
+                else Biller refuses the payment
+                    Biller-->>Orch: Refused(failureReason)
+                    Orch->>Orch: Transition SentToBiller -> Failed (record history)
+                    Orch->>Wallet: releaseHold(paymentId, totalAmount)
+                    Note over Wallet: Writes RELEASE ledger entry. Available balance is restored. No commission is credited.
+                    Orch->>Orch: Transition Failed -> Refunded (record history)
+                    Orch->>Audit: record(system, HOLD_RELEASED, totalAmount and failureReason, now)
+                    Orch->>Notif: sendPaymentResult(customerId, paymentId, FAILED, failureReason)
+                    Note over Notif: One SMS (with the clear failure reason) and one Push. Up to 3 retries.
+                    Orch-->>API: Failed and Refunded
+                    API-->>Payer: 200 Payment Failed and Refunded
+                else TopUpNet replies Accepted (async biller)
+                    Biller-->>Orch: Accepted(billerReference)
+                    Orch->>Orch: Set acceptedAt = now. Payment STAYS in SentToBiller (not Completed).
+                    Orch->>Sch: scheduleCallbackTimeout(paymentId, acceptedAt + 5 minutes)
+                    Orch-->>API: Accepted, processing
+                    API-->>Payer: 202 Accepted (processing)
+                else Live biller does not answer within 10 seconds
+                    Biller-->>Orch: Timeout
+                    Orch->>Orch: Transition SentToBiller -> Unknown, set unknownAt = now (record history)
+                    Note over Orch: Funds stay held, no auto-refund.
+                    Orch->>Sch: scheduleRequeries(paymentId, unknownAt + 1, 5 and 15 minutes)
+                    Orch->>Audit: record(system, PAYMENT_UNKNOWN, timeout, now)
+                    Orch->>Notif: tell the customer the payment is being processed
+                    Orch-->>API: Unknown
+                    API-->>Payer: 202 Accepted (Unknown, being processed)
+                end
+            end
+        end
+    end
+
+    Note over Payer,Audit: PART 2 - Later events that resolve a payment (US-13, US-14, US-26, US-30, US-31)
+
+    rect rgb(245, 245, 245)
+        Note over TN,Audit: 2A) TopUpNet callback
+        TN->>CB: POST /callbacks/topupnet (externalEventId, paymentReference, status)
+        CB->>CB: Save every callback as a BILLER_CALLBACKS row, even a duplicate
+        CB->>Orch: applyCallback(paymentReference, status, callbackId)
+
+        alt State is SentToBiller or Unknown and status = success
+            Orch->>Orch: Transition to Completed (record history)
+            Orch->>Wallet: captureAndSettle(paymentId, totalAmount, feeAmount, commissionAmount, agentId)
+            Orch->>Audit: record(FUNDS_CAPTURED, FEE_CREDITED, COMMISSION_CREDITED)
+            Orch->>Notif: sendPaymentResult(COMPLETED)
+            Note over Orch: Callback outcome = APPLIED
+        else State is SentToBiller or Unknown and status = failed
+            Orch->>Orch: Transition to Failed (record history)
+            Orch->>Wallet: releaseHold(paymentId, totalAmount)
+            Orch->>Orch: Transition Failed -> Refunded (record history)
+            Orch->>Audit: record(HOLD_RELEASED)
+            Orch->>Notif: sendPaymentResult(FAILED, reason)
+            Note over Orch: Callback outcome = APPLIED
+        else Payment already final with the SAME result (duplicate)
+            Note over Orch: Outcome = IGNORED_DUPLICATE. No state change, no second charge, no second fee credit, no second commission, no second history row.
+            Orch->>Audit: record(CALLBACK_IGNORED_DUPLICATE, paymentId, now)
+        else Payment already final with a CONFLICTING result
+            Note over Orch: Outcome = CONFLICT_FLAGGED. State unchanged. flaggedForReview = true for support.
+            Orch->>Audit: record(CALLBACK_CONFLICT, paymentId, now)
+        end
+        CB-->>TN: 200 OK
+    end
+
+    rect rgb(245, 245, 245)
+        Note over TN,Audit: 2B) No TopUpNet callback within 5 minutes
+        Sch->>Orch: acceptedAt + 5 minutes reached, payment still SentToBiller
+        Orch->>Orch: Transition SentToBiller -> Unknown, set unknownAt = now (record history)
+        Orch->>Sch: scheduleRequeries(paymentId, unknownAt + 1, 5 and 15 minutes)
+        Orch->>Audit: record(system, PAYMENT_UNKNOWN, no callback in 300 s)
+        Note over Orch: Money stays held.
+    end
+
+    rect rgb(245, 245, 245)
+        Note over Orch,Audit: 2C) Re-queries of an Unknown payment (max 3, all measured from unknownAt)
+        loop At unknownAt + 1 min, + 5 min, + 15 min
+            Sch->>Orch: requery(paymentId)
+            Orch->>Biller: queryStatus(paymentReference)
+            Orch->>Orch: Store the reply in BILLER_EXCHANGES and increase retryCount
+            alt Biller confirms
+                Biller-->>Orch: Confirmed
+                Orch->>Orch: Transition Unknown -> Completed
+                Orch->>Wallet: captureAndSettle(...) (fee income and agent commission credited now)
+                Orch->>Notif: sendPaymentResult(COMPLETED)
+            else Biller refuses
+                Biller-->>Orch: Refused
+                Orch->>Orch: Transition Unknown -> Failed
+                Orch->>Wallet: releaseHold(...)
+                Orch->>Orch: Transition Failed -> Refunded
+                Orch->>Notif: sendPaymentResult(FAILED, reason)
+            else No clear answer
+                Biller-->>Orch: Unclear or no answer
+                Note over Orch: Stays Unknown, money stays held. After the 3rd re-query nothing is refunded until reconciliation.
+            end
+        end
+    end
+
+    rect rgb(245, 245, 245)
+        Note over Rec,Audit: 2D) Daily reconciliation
+        Rec->>Rec: Read the biller settlement file (paymentReference, amount, status). Match each line by paymentReference.
+        loop Each line and each PayLink payment of that biller and day
+            alt Payment is Unknown and the file lists it as received
+                Rec->>Orch: resolve(paymentId, Completed)
+                Orch->>Wallet: captureAndSettle(...)
+                Note over Rec: Item action = RESOLVED_COMPLETED
+            else Payment is Unknown and the file does not list it
+                Rec->>Orch: resolve(paymentId, Failed)
+                Orch->>Wallet: releaseHold(...) then Failed -> Refunded
+                Note over Rec: Item action = RESOLVED_FAILED
+            else Payment is Failed or Refunded and the file lists it as received
+                Note over Rec: Item saved with paymentReference, paylinkState and billerStatus. Action = FLAGGED_FOR_SUPPORT. No change to payment state or any wallet balance.
+            else Other state mismatch or amount mismatch
+                Note over Rec: Item saved as STATE_MISMATCH, AMOUNT_MISMATCH or MISSING_IN_PAYLINK / MISSING_IN_SETTLEMENT
+            else Everything agrees
+                Note over Rec: Item saved as MATCHED
+            end
+        end
+        Rec->>Audit: record(RECONCILIATION_RUN, billerId, settlementDate)
+    end
