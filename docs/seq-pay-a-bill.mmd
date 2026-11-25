@@ -1,0 +1,52 @@
+sequenceDiagram
+    autonumber
+    actor Payer as "Customer / Agent"
+    participant API as "PaymentController"
+    participant Fraud as "FraudCheckChain"
+    participant Wallet as "WalletService"
+    participant Fee as "FeeCalculator"
+    participant Orchestrator as "PaymentOrchestrator"
+    participant Biller as "BillerAdapter"
+    participant Notif as "NotificationService"
+    participant Audit as "AuditLog"
+
+    Payer->>API: POST /payments (idempotencyKey, serviceId, accountRef, amount, agentId)
+    API->>Orchestrator: findByIdempotencyKey(idempotencyKey)
+
+    alt Duplicate idempotencyKey already exists
+        Orchestrator-->>API: Return stored payment result (no duplicate charge)
+        API-->>Payer: 200 OK / original payment response
+    else New payment request
+        Orchestrator->>API: Create payment in state Initiated
+        API->>Fraud: evaluate(payer, serviceId, amount, now)
+        Note over Fraud: Checks: account blocked, over 5 payments in 60s (10m block), 5-10000 EGP bounds, daily limit (5k BASIC / 30k VERIFIED)
+
+        alt Fraud / limit check fails
+            Fraud-->>Orchestrator: Rejected(reason)
+            Orchestrator->>Orchestrator: Transition Initiated -> Rejected
+            Orchestrator->>Audit: record(actor, PAYMENT_REJECTED, reason, now)
+            API-->>Payer: 422 / error with clear reason
+        else Fraud / limit checks pass
+            Fraud-->>Orchestrator: Passed
+            Orchestrator->>Fee: calculateFeeAndTotal(serviceId, amount, agentId, now)
+            Note over Fee: Fixed 2.50, 1.5 percent (min 1 EGP), tiered 2 or 4 EGP, 0 if promo; agent commission is 40 percent of fee
+            Fee-->>Orchestrator: feeAmount, totalAmount, commissionAmount
+
+            Orchestrator->>Wallet: holdFunds(walletId, paymentId, totalAmount, idempotencyKey)
+            Note over Wallet: Creates HOLD ledger entry; never overwrites balance directly; prevents negative balance under concurrency
+
+            alt Insufficient available funds
+                Wallet-->>Orchestrator: InsufficientFunds
+                Orchestrator->>Orchestrator: Transition Initiated -> Rejected
+                Orchestrator->>Audit: record(actor, PAYMENT_REJECTED, Insufficient funds, now)
+                API-->>Payer: 409 / 422 insufficient funds
+            else Funds held
+                Wallet-->>Orchestrator: HoldCreated
+                Orchestrator->>Orchestrator: Transition FundsHeld -> SentToBiller
+                Orchestrator->>Biller: payBill(billerReference, accountRef, amount)
+
+                alt Biller confirms payment (within 10s timeout)
+                    Biller-->>Orchestrator: Confirmed(receiptRef)
+                    Orchestrator->>Orchestrator: Transition SentToBiller -> Completed
+                    Orchestrator->>Wallet: captureHoldAndSettle(walletId, paymentId, totalAmount, feeAmount, commissionAmount, agentId)
+                    Note over Wallet: CAPTURE hold, credit FEE_INCOME, and credit COMMISSION
