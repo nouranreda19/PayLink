@@ -22,6 +22,12 @@ classDiagram
         BLOCKED
     }
 
+    class BlockSource {
+        <<enumeration>>
+        VELOCITY
+        SUPPORT
+    }
+
     class PaymentState {
         <<enumeration>>
         Initiated
@@ -34,6 +40,13 @@ classDiagram
         Rejected
     }
 
+    class RefundStatus {
+        <<enumeration>>
+        PENDING_APPROVAL
+        APPROVED
+        REJECTED
+    }
+
     class LedgerEntryType {
         <<enumeration>>
         TOP_UP
@@ -43,6 +56,14 @@ classDiagram
         REFUND
         FEE_INCOME
         COMMISSION
+        FEE_REVERSAL
+        COMMISSION_REVERSAL
+    }
+
+    class TopUpMethod {
+        <<enumeration>>
+        SIMULATED_CARD
+        AGENT_CASH
     }
 
     class FeeType {
@@ -50,6 +71,21 @@ classDiagram
         FIXED
         PERCENTAGE
         TIERED
+    }
+
+    class BillerOutcome {
+        <<enumeration>>
+        CONFIRMED
+        REFUSED
+        ACCEPTED
+        TIMEOUT
+    }
+
+    class CallbackOutcome {
+        <<enumeration>>
+        APPLIED
+        IGNORED_DUPLICATE
+        CONFLICT_FLAGGED
     }
 
     class NotificationChannel {
@@ -76,6 +112,14 @@ classDiagram
         AMOUNT_MISMATCH
     }
 
+    class ReconciliationAction {
+        <<enumeration>>
+        NONE
+        RESOLVED_COMPLETED
+        RESOLVED_FAILED
+        FLAGGED_FOR_SUPPORT
+    }
+
     class User {
         +UUID id
         +UserRole role
@@ -84,6 +128,7 @@ classDiagram
         +String phone
         +VerificationLevel verificationLevel
         +AccountStatus accountStatus
+        +BlockSource blockSource
         +DateTime blockedUntil
         +DateTime createdAt
         +isBlocked(DateTime now) bool
@@ -92,7 +137,7 @@ classDiagram
 
     class Customer {
         +String nationalId
-        +canPayAmount(Decimal amount, Decimal spentTodayEgp) bool
+        +canPayAmount(Decimal totalAmount, Decimal spentTodayEgp) bool
     }
 
     class Agent {
@@ -116,9 +161,32 @@ classDiagram
         +UUID id
         +UUID walletId
         +UUID paymentId
+        +UUID refundId
         +LedgerEntryType entryType
         +Decimal amount
         +DateTime createdAt
+    }
+
+    class TopUp {
+        +UUID id
+        +UUID walletId
+        +UUID agentId
+        +UUID ledgerEntryId
+        +TopUpMethod method
+        +Decimal amount
+        +DateTime createdAt
+    }
+
+    class IdempotencyKey {
+        +UUID id
+        +UUID customerId
+        +String key
+        +String requestHash
+        +UUID paymentId
+        +DateTime createdAt
+        +DateTime expiresAt
+        +isExpired(DateTime now) bool
+        +matches(String requestHash) bool
     }
 
     class Biller {
@@ -143,7 +211,8 @@ classDiagram
         +Decimal feeValue
         +Decimal minFee
         +bool isActive
-        +validateAmount(Decimal amount) bool
+        +validateTotalAmount(Decimal totalAmount) bool
+        +missingFields(Map~String,String~ inputValues) List~String~
     }
 
     class FeeTier {
@@ -156,14 +225,14 @@ classDiagram
     class Promotion {
         +UUID id
         +UUID billerId
-        +DateTime startAt
-        +DateTime endAt
+        +Date startDate
+        +Date endDate
         +bool isActive
-        +appliesOn(DateTime timestamp) bool
+        +appliesOn(Date cairoDay) bool
     }
 
     class FeeCalculator {
-        +calculateServiceFee(BillService service, Decimal billAmount, Promotion promo, DateTime now) Decimal
+        +calculateServiceFee(BillService service, Decimal billAmount, Promotion promo, Date cairoDay) Decimal
         +calculateAgentCommission(Agent agent, Decimal serviceFee) Decimal
     }
 
@@ -178,7 +247,8 @@ classDiagram
 
     class Payment {
         +UUID id
-        +String idempotencyKey
+        +String paymentReference
+        +UUID idempotencyKeyId
         +String billerReference
         +UUID customerId
         +UUID agentId
@@ -187,17 +257,23 @@ classDiagram
         +Decimal billAmount
         +Decimal feeAmount
         +Decimal totalAmount
+        +Decimal commissionAmount
         +PaymentState state
         +String failureReason
+        +Date cairoDate
         +int retryCount
+        +DateTime acceptedAt
+        +DateTime unknownAt
         +DateTime nextRetryAt
+        +DateTime completedAt
         +DateTime createdAt
         +DateTime updatedAt
         +holdFunds() void
         +markSentToBiller() void
+        +markAccepted(DateTime now) void
         +complete() void
         +fail(String reason) void
-        +markUnknown() void
+        +markUnknown(DateTime now) void
         +refund() void
         +reject(String reason) void
     }
@@ -211,12 +287,23 @@ classDiagram
         +DateTime occurredAt
     }
 
+    class BillerExchange {
+        +UUID id
+        +UUID paymentId
+        +String exchangeType
+        +BillerOutcome outcome
+        +String payload
+        +DateTime occurredAt
+    }
+
     class BillerCallback {
         +UUID id
         +UUID paymentId
         +String externalEventId
+        +String callbackStatus
         +String payload
-        +bool processed
+        +CallbackOutcome outcome
+        +bool flaggedForReview
         +DateTime receivedAt
     }
 
@@ -225,6 +312,7 @@ classDiagram
         +UUID paymentId
         +NotificationChannel channel
         +String recipient
+        +String messageType
         +NotificationStatus status
         +int attemptCount
         +DateTime updatedAt
@@ -243,14 +331,30 @@ classDiagram
         +UUID id
         +UUID settlementFileId
         +UUID paymentId
-        +String billerReference
+        +String paymentReference
         +Decimal billerAmount
+        +String billerStatus
         +Decimal paylinkAmount
         +String paylinkState
         +DifferenceType differenceType
+        +ReconciliationAction actionTaken
         +bool reviewed
         +String reviewNote
         +DateTime createdAt
+    }
+
+    class Refund {
+        +UUID id
+        +UUID paymentId
+        +UUID requestedBy
+        +UUID reviewedBy
+        +Decimal refundAmount
+        +RefundStatus status
+        +String reason
+        +DateTime createdAt
+        +DateTime reviewedAt
+        +approve(UUID reviewerId, DateTime now) void
+        +reject(UUID reviewerId, DateTime now) void
     }
 
     class AuditLog {
@@ -264,11 +368,121 @@ classDiagram
         +DateTime occurredAt
     }
 
+    class PaymentController {
+        +createPayment(request) Response
+    }
+
+    class CallbackController {
+        +receiveCallback(billerCode, request) Response
+    }
+
+    class PaymentOrchestrator {
+        +processPayment(request) PaymentResult
+        +applyBillerResult(UUID paymentId, BillerOutcome outcome) void
+        +applyCallback(String paymentReference, String status, UUID callbackId) CallbackOutcome
+        +resolveUnknown(UUID paymentId, PaymentState target) void
+    }
+
+    class PaymentStateMachine {
+        +assertAllowed(PaymentState from, PaymentState to) void
+    }
+
+    class IdempotencyService {
+        +lookup(UUID customerId, String key, String requestHash) IdempotencyKey
+        +store(UUID customerId, String key, String requestHash, UUID paymentId) void
+    }
+
+    class CatalogService {
+        +validate(UUID serviceId, Map~String,String~ inputValues) ValidationResult
+        +inquire(UUID serviceId, Map~String,String~ inputValues) InquiryResult
+    }
+
+    class FraudCheck {
+        <<interface>>
+        +check(UUID customerId, Decimal totalAmount, DateTime now) CheckResult
+    }
+
+    class AccountBlockedCheck
+    class VelocityCheck
+    class AmountLimitCheck
+    class DailyLimitCheck
+
+    class FraudCheckChain {
+        +evaluate(UUID customerId, Decimal totalAmount, DateTime now) CheckResult
+    }
+
+    class WalletService {
+        +lock(UUID walletId) void
+        +topUp(UUID walletId, Decimal amount, TopUpMethod method, UUID agentId) void
+        +holdFunds(UUID walletId, UUID paymentId, Decimal totalAmount) HoldResult
+        +captureAndSettle(UUID paymentId, Decimal total, Decimal fee, Decimal commission, UUID agentId) void
+        +releaseHold(UUID paymentId, Decimal totalAmount) void
+        +payRefund(UUID refundId) void
+    }
+
+    class BillerAdapter {
+        <<interface>>
+        +inquire(inputValues) InquiryResult
+        +payBill(paymentReference, inputValues, billAmount) BillerOutcome
+        +queryStatus(paymentReference) BillerOutcome
+        +parseCallback(payload) CallbackData
+        +parseSettlementFile(file) List~SettlementLine~
+    }
+
+    class ElectroCoAdapter
+    class AquaCoAdapter
+    class TopUpNetAdapter
+
+    class BillerAdapterRegistry {
+        +getAdapter(String billerCode) BillerAdapter
+    }
+
+    class RequeryScheduler {
+        +scheduleRequeries(Payment payment) void
+        +scheduleCallbackTimeout(Payment payment) void
+    }
+
+    class ReconciliationService {
+        +run(UUID billerId, Date settlementDate) List~ReconciliationItem~
+    }
+
+    class NotificationService {
+        +sendPaymentResult(UUID customerId, UUID paymentId, PaymentState result, String reason) void
+        +retryFailed() void
+    }
+
+    class RefundService {
+        +request(UUID paymentId, UUID customerId) Refund
+        +approve(UUID refundId, UUID supportId) void
+    }
+
+    class SupportService {
+        +findPayment(String paymentReference) PaymentDetails
+        +history(UUID paymentId) PaymentHistory
+        +blockAccount(UUID userId, UUID supportId) void
+        +unblockAccount(UUID userId, UUID supportId) void
+    }
+
+    class AdminService {
+        +upgradeToVerified(UUID customerId, UUID adminId) void
+        +manageBiller(command) void
+        +updateConfig(String key, String value, UUID adminId) void
+        +dailyTotals(Date cairoDay) DailyTotals
+    }
+
+    class AuditService {
+        +record(UUID actorId, String action, String entityType, UUID entityId, String reason, String details) void
+    }
+
     User <|-- Customer
     User <|-- Agent
     User "1" --> "1" Wallet : owns
     Wallet "1" --> "0..*" LedgerEntry : records
+    Wallet "1" --> "0..*" TopUp : receives
+    Agent "0..1" --> "0..*" TopUp : takes cash for
     Customer "1" --> "0..*" Payment : initiates
+    Customer "1" --> "0..*" IdempotencyKey : owns
+    Payment "1" --> "0..1" IdempotencyKey : created by
     Agent "0..1" --> "0..*" Payment : processes on behalf of
     Biller "1" --> "1..*" BillService : offers
     Biller "1" --> "0..*" Promotion : runs
@@ -281,16 +495,55 @@ classDiagram
     SystemConfig ..> User : updated by
     Payment "1" --> "0..*" LedgerEntry : generates
     Payment "1" --> "0..*" PaymentStateHistory : transitions
+    Payment "1" --> "0..*" BillerExchange : talks to biller
     Payment "1" --> "0..*" BillerCallback : receives
     Payment "1" --> "0..*" Notification : triggers
+    Payment "1" --> "0..*" Refund : has refund requests
+    Refund "1" --> "0..*" LedgerEntry : money back
+    User "1" --> "0..*" Refund : requests / reviews
     Biller "1" --> "0..*" SettlementFile : sends
     SettlementFile "1" --> "0..*" ReconciliationItem : produces
     ReconciliationItem "0..*" --> "0..1" Payment : compares with
     User "0..1" --> "0..*" AuditLog : performs
 
-    note for User "role CUSTOMER / AGENT / ADMIN / SUPPORT / SYSTEM.\nAdmin and Support are roles, not separate tables.\nThe SYSTEM user is seeded and owns PayLink's own wallet (fee income).\nCustomer.nationalId maps to users.national_id (customers only); daily limit is resolved per user/customer."
-    note for Wallet "Balances are computed from LedgerEntry (never overwritten); exact Decimal.\nAvailable = TOP_UP + RELEASE + REFUND + FEE_INCOME + COMMISSION - HOLD\nHeld = HOLD - CAPTURE - RELEASE\nAmounts are stored positive; the entry type gives the sign.\nversion = optimistic lock (hard case 4)."
-    note for LedgerEntry "Unique (payment_id, wallet_id, entry_type) when payment_id is set,\nso a payment cannot be captured or refunded twice.\nFEE_INCOME = service fee minus commission (SYSTEM wallet).\nCOMMISSION = agent share (agent wallet)."
-    note for Agent "Agent id = User id (agents.user_id is the PK).\ncommissionRate defaults from config AGENT_COMMISSION_RATE (0.40).\nFeeCalculator is the only place that computes commission."
-    note for Payment "State transitions follow Section 2.5;\nno auto-refund while state is Unknown.\nUnique (customerId, idempotencyKey).\ninputValues holds the meter or phone number sent to the biller."
-    note for SystemConfig "Limits, fees, velocity, retry and commission values.\nEditable at runtime without redeploying (FR-24)."
+    PaymentController ..> PaymentOrchestrator : calls
+    CallbackController ..> PaymentOrchestrator : calls
+    PaymentOrchestrator ..> IdempotencyService : uses
+    PaymentOrchestrator ..> CatalogService : uses
+    PaymentOrchestrator ..> FeeCalculator : uses
+    PaymentOrchestrator ..> FraudCheckChain : uses
+    PaymentOrchestrator ..> WalletService : uses
+    PaymentOrchestrator ..> BillerAdapterRegistry : uses
+    PaymentOrchestrator ..> PaymentStateMachine : uses
+    PaymentOrchestrator ..> NotificationService : uses
+    PaymentOrchestrator ..> AuditService : uses
+    PaymentOrchestrator ..> RequeryScheduler : uses
+    FraudCheckChain o-- FraudCheck : runs in order
+    FraudCheck <|.. AccountBlockedCheck
+    FraudCheck <|.. VelocityCheck
+    FraudCheck <|.. AmountLimitCheck
+    FraudCheck <|.. DailyLimitCheck
+    BillerAdapterRegistry o-- BillerAdapter : finds by biller code
+    BillerAdapter <|.. ElectroCoAdapter
+    BillerAdapter <|.. AquaCoAdapter
+    BillerAdapter <|.. TopUpNetAdapter
+    RequeryScheduler ..> PaymentOrchestrator : calls
+    ReconciliationService ..> BillerAdapterRegistry : parses files
+    ReconciliationService ..> PaymentOrchestrator : resolves Unknown
+    RefundService ..> WalletService : pays refund
+    RefundService ..> AuditService : records
+    AdminService ..> AuditService : records
+    SupportService ..> AuditService : records
+
+    note for User "role CUSTOMER / AGENT / ADMIN / SUPPORT / SYSTEM.\nAdmin and Support are roles, not separate tables.\nThe SYSTEM user is seeded and owns PayLink's own wallet (fee income).\nA velocity block sets blockedUntil (10 minutes). A support block has no end time until support unblocks.\nWhile blocked, only bill payments are refused. Wallet view and top-ups still work."
+    note for Wallet "Balances are computed from LedgerEntry (never overwritten), exact Decimal.\nAvailable = TOP_UP + RELEASE + REFUND + FEE_INCOME + COMMISSION - HOLD - FEE_REVERSAL - COMMISSION_REVERSAL\nHeld = HOLD - CAPTURE - RELEASE\nAmounts are stored positive. The entry type gives the sign.\nversion = optimistic lock. A row lock is also taken during the limit check and hold (hard case 4)."
+    note for LedgerEntry "Unique (payment_id, wallet_id, entry_type) when payment_id is set,\nso a payment cannot be captured, released or refunded twice.\nFEE_INCOME = service fee minus commission (SYSTEM wallet).\nCOMMISSION = agent share (agent wallet).\nOn an approved refund: REFUND to the customer, COMMISSION_REVERSAL from the agent, FEE_REVERSAL from the SYSTEM wallet."
+    note for Agent "Agent id = User id (agents.user_id is the PK).\ncommissionRate defaults from config AGENT_COMMISSION_RATE (0.40).\nFeeCalculator is the only place that computes commission.\nThe commission amount is stored on the Payment when it is created, so a late completion or a refund uses the same value."
+    note for Payment "State transitions follow FR-11 and are checked by PaymentStateMachine.\nNo auto-refund while state is Unknown.\npaymentReference is the PayLink reference sent to the biller and used to match callbacks and settlement lines.\n5.00 to 10000.00 EGP bounds apply to totalAmount (bill + fee).\nunknownAt is the start for the 1, 5 and 15 minute re-queries. acceptedAt is the start of the 5 minute TopUpNet callback timer.\ncairoDate is the Cairo calendar day used for the daily limit."
+    note for IdempotencyKey "Unique (customerId, key). The customer is the payer, even when an agent sends the request.\nKept until expiresAt (IDEMPOTENCY_RETENTION in config)."
+    note for BillerCallback "Every callback is saved, including duplicates, so support can see that it was received and ignored.\nexternalEventId is NOT unique.\nA conflicting callback is flagged for review. The payment state is never changed by it."
+    note for BillerAdapter "Biller Integration module. Adding a biller means adding one adapter and configuration only (NFR-4).\nElectroCo: live, confirms in the same request.\nAquaCo: live but slower, still within 10 seconds.\nTopUpNet: replies Accepted and calls back later.\nAll billers must follow the same payment life cycle."
+    note for ReconciliationItem "Matched by paymentReference using the common file layout: payment reference, amount, status.\nOnly Unknown payments are resolved automatically (to Completed or Failed).\nFailed or Refunded payments listed as received are flagged only. No state or balance change."
+    note for Refund "Full refunds only on Completed payments after support approval.\nThe payment stays Completed and a separate refund record plus ledger entries are created."
+    note for SystemConfig "Limits, fees, velocity, timeouts, retry schedule, idempotency retention and commission values.\nEditable at runtime without redeploying (FR-24). Every change is audited."
+    note for AuditService "One audit record for every money movement: top-up, hold, capture, fee credit, commission credit, release, refund.\nAlso for biller, service, fee, limit and account changes."
