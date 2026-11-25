@@ -1,0 +1,38 @@
+@startuml
+title PayLink - Sequence Diagram 2: Refund a Failed Payment
+autonumber
+
+actor Customer
+participant Biller
+participant "Biller Adapter" as Adapter
+participant "Payment Service" as Payment
+participant "Wallet Service" as Wallet
+participant Ledger
+participant "Notification Service" as Notify
+participant "SMS / Push Provider" as Provider
+
+note over Payment,Wallet
+  The payment has already reached SentToBiller.
+  The payment amount is held in the customer's wallet.
+end note
+
+Biller -> Adapter : Send refusal response
+Adapter -> Payment : Report payment failed
+
+Payment -> Payment : Change state to Failed
+
+Payment -> Wallet : Release held amount\n(paymentId, amount)
+Wallet -> Wallet : Move amount from held\nto available balance
+
+Wallet -> Ledger : Record hold release
+Ledger --> Wallet : Entry recorded
+
+Wallet --> Payment : Release successful
+
+Payment -> Payment : Change state to Refunded
+
+Payment -> Notify : Send failed payment notification
+Notify -> Provider : Send SMS and push notification
+Provider --> Notify : Delivery result
+Provider -> Customer : Deliver failed payment notification
+@enduml
