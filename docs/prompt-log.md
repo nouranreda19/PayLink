@@ -1,4 +1,5 @@
-# Prompt Log
+
+# PayLink - AI Prompt Log
 
 ## Entry 1: Problem Summary
 
@@ -291,3 +292,16 @@ Output format: the table only, then one Prompt Log row (Date | Author | Stage | 
 
 - **Summary of answer:** A 25-row table with options for each question and "TBD by team" in the Decision and Reason columns. The daily limit and velocity topics are split into two rows each. The contradiction between FR-27 and the life cycle (Completed is final) is its own row (row 25). The AI also corrected a wrong page reference in my prompt (the re-query rule is on page 5 and FR-13 on page 8).
 - **Verdict and why:** **Accepted.** I checked the page numbers and the ambiguities against the brief, and found nothing invented. Row 25 matches page 5 (Completed is final, Refunded follows only Failed) and FR-27 on page 9.
+
+
+
+
+| Date | Author | Stage | Tool and Model | Prompt | Summary of Answer | Verdict (accepted, fixed, rejected) and Why |
+|---|---|---|---|---|---|---|
+| 2026-11-25 | Member 3 | Design - Use Case Diagram | ChatGPT - GPT-6 | Act as a software engineering analyst. Based on the PayLink requirements, create a detailed PlantUML use case diagram. Include Customer, Agent, Admin, Support Employee, Biller and Notification Provider. Group related use cases into packages and use include/extend relationships where appropriate. | Generated a use case diagram with actors, packages, use cases and include/extend relationships. | Fixed: the initial diagram needed improvements in its UML relationships. I reviewed the relationships and corrected unnecessary or incorrect connections to make the diagram more consistent with the system requirements. |
+| 2026-11-25 | Member 3 | Design - Payment State Diagram | ChatGPT - GPT-6 | Create a PlantUML state diagram for PayLink payments. Include Initiated, FundsHeld, SentToBiller, Completed, Failed, Unknown, Rejected and Refunded. Follow the allowed transitions in the project requirements. Unknown payments must not be refunded automatically. | Generated the payment lifecycle and its transitions. The initial version included the main states but needed to represent the refund process from Failed. | Fixed: I checked the diagram against the requirements and ensured that Failed transitions to Refunded only after the held amount is released. I also ensured that Completed, Rejected and Refunded are final states. |
+| 2026-11-25 | Member 3 | Design - State Diagram Layout | ChatGPT - GPT-6 | Improve the layout of the payment state diagram. The transition labels from Initiated to FundsHeld and Rejected overlap. Separate the two paths clearly without changing the payment lifecycle logic. | The first generated layout had overlapping transition labels and a Final State note covering the arrows. The next version introduced a decision diamond, but the layout still did not solve the overlap. | Fixed: I rejected the first two layouts because they did not solve the visual problem. I improved the prompt by requiring the arrows to go in opposite directions, with Rejected on the left and FundsHeld on the right, and increased spacing. |
+| 2026-11-25 | Member 3 | Design - Sequence Diagram: Refund a Failed Payment | ChatGPT - GPT-6 | Create a PlantUML sequence diagram for refunding a failed PayLink payment. Include Biller, Biller Adapter, Payment Service, Wallet Service, Ledger and Notification Service. Show the held amount being released before the payment becomes Refunded. | Generated a sequence diagram showing the biller refusal, payment failure, wallet release, ledger entry and customer notification. | Fixed: the initial diagram showed the Notification Service notifying the Customer directly. I corrected the interaction so the external SMS/Push Provider delivers the notification to the Customer. |
+| 2026-11-25 | Member 3 | Design - Diagram Validation | ChatGPT - GPT-6 | Review my PayLink payment state diagram and failed-payment refund sequence diagram against the official project requirements. Identify incorrect transitions, missing steps and inconsistencies. Do not invent new requirements. | Reviewed the diagrams and identified improvements related to payment state transitions, wallet release, ledger recording and notification delivery. | Accepted with corrections: I used the review to check consistency between the two diagrams and retained the changes that matched the project requirements. |
+
+
