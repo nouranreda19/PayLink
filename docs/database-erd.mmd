@@ -1,155 +1,131 @@
 erDiagram
     USERS ||--|| WALLETS : owns
-    USERS ||--o| AGENTS : "may be"
-    USERS ||--o{ AUDIT_LOGS : performs
-    USERS ||--o{ SYSTEM_CONFIG : updates
-    USERS ||--o{ REFUNDS : "requests / reviews"
-    USERS ||--o{ IDEMPOTENCY_KEYS : owns
     WALLETS ||--o{ LEDGER_ENTRIES : records
-    WALLETS ||--o{ TOP_UPS : receives
-    AGENTS ||--o{ TOP_UPS : "takes cash for"
-    BILLERS ||--|{ BILL_SERVICES : offers
+    PAYMENTS }o--o{ LEDGER_ENTRIES : generates
+    REFUND_REQUESTS }o--o{ LEDGER_ENTRIES : generates
+
+    USERS ||--o{ PAYMENTS : initiates_as_customer
+    USERS |o--o{ PAYMENTS : submits_as_agent
+    BILLERS ||--o{ BILLER_SERVICES : offers
+    BILLERS ||--o{ FEE_TIERS : defines
     BILLERS ||--o{ PROMOTIONS : runs
-    BILLERS ||--o{ SETTLEMENT_FILES : sends
-    BILL_SERVICES ||--o{ BILL_SERVICE_FEE_TIERS : "has tiers"
-    BILL_SERVICES ||--o{ PAYMENTS : "billed via"
-    USERS ||--o{ PAYMENTS : "initiates as customer"
-    AGENTS ||--o{ PAYMENTS : "processes for"
-    PAYMENTS ||--o{ LEDGER_ENTRIES : generates
-    PAYMENTS ||--o{ PAYMENT_STATE_HISTORY : transitions
-    PAYMENTS ||--o{ BILLER_EXCHANGES : "talks to biller"
+    BILLERS ||--o{ PAYMENTS : receives
+    BILLER_SERVICES ||--o{ PAYMENTS : paid_for
+
+    PAYMENTS ||--|{ PAYMENT_STATE_HISTORY : tracks
     PAYMENTS ||--o{ BILLER_CALLBACKS : receives
+    PAYMENTS |o--o| REFUND_REQUESTS : has
     PAYMENTS ||--o{ NOTIFICATIONS : triggers
-    PAYMENTS ||--o{ REFUNDS : "has refunds"
-    PAYMENTS ||--o| IDEMPOTENCY_KEYS : "created by"
-    REFUNDS ||--o{ LEDGER_ENTRIES : "money back"
-    SETTLEMENT_FILES ||--o{ RECONCILIATION_ITEMS : produces
-    PAYMENTS |o--o{ RECONCILIATION_ITEMS : "compared in"
+    USERS ||--o{ NOTIFICATIONS : receives
+
+    BILLERS ||--o{ SETTLEMENT_FILES : provides
+    SETTLEMENT_FILES ||--o{ RECONCILIATION_ITEMS : contains
+    PAYMENTS |o--o{ RECONCILIATION_ITEMS : matched_in
 
     USERS {
         uuid id PK
-        string role "CUSTOMER, AGENT, ADMIN, SUPPORT, SYSTEM"
-        string name
-        string email UK
-        string phone UK
-        string national_id UK "nullable, customers only"
-        string verification_level "BASIC or VERIFIED"
-        string account_status "ACTIVE or BLOCKED"
-        string block_source "nullable, VELOCITY or SUPPORT"
-        timestamp blocked_until "nullable, null with BLOCKED means until support unblocks"
-        timestamp created_at
-    }
-
-    AGENTS {
-        uuid user_id PK,FK "same value as users.id"
-        string terminal_code UK
-        decimal commission_rate "0.40, default from SYSTEM_CONFIG"
+        varchar full_name
+        varchar phone_number UK
+        varchar email UK
+        varchar role
+        varchar verification_level
+        varchar status
+        timestamp blocked_until
+        varchar block_reason
         timestamp created_at
     }
 
     WALLETS {
         uuid id PK
-        uuid owner_id FK,UK "one wallet per user"
-        string currency "EGP"
-        int version "optimistic lock, used with a row lock in the payment critical section"
-        timestamp updated_at
+        uuid user_id FK,UK
+        varchar currency
+        timestamp created_at
     }
 
     LEDGER_ENTRIES {
         uuid id PK
         uuid wallet_id FK
-        uuid payment_id FK "nullable, UK(payment_id, wallet_id, entry_type) when set"
-        uuid refund_id FK "nullable, set for REFUND, FEE_REVERSAL, COMMISSION_REVERSAL"
-        string entry_type "TOP_UP, HOLD, CAPTURE, RELEASE, REFUND, FEE_INCOME, COMMISSION, FEE_REVERSAL, COMMISSION_REVERSAL"
-        decimal amount "numeric(19,2), stored positive, never float"
+        uuid payment_id FK
+        uuid refund_request_id FK
+        varchar entry_type
+        decimal available_delta
+        decimal held_delta
+        varchar reason
         timestamp created_at
     }
 
-    TOP_UPS {
+    SYSTEM_CONFIG {
         uuid id PK
-        uuid wallet_id FK
-        uuid agent_id FK "nullable, set for agent cash"
-        uuid ledger_entry_id FK "the TOP_UP ledger entry"
-        string method "SIMULATED_CARD or AGENT_CASH"
-        decimal amount
-        timestamp created_at
-    }
-
-    IDEMPOTENCY_KEYS {
-        uuid id PK
-        uuid customer_id FK "UK together with idempotency_key"
-        string idempotency_key "UK together with customer_id"
-        string request_hash "hash of the payment details"
-        uuid payment_id FK "the original payment"
-        timestamp created_at
-        timestamp expires_at "created_at + IDEMPOTENCY_RETENTION from config, expired rows can be deleted"
+        decimal min_single_payment
+        decimal max_single_payment
+        decimal basic_daily_limit
+        decimal verified_daily_limit
+        int velocity_max_payments
+        int velocity_window_seconds
+        int velocity_block_minutes
+        int live_biller_timeout_seconds
+        int async_callback_timeout_seconds
+        int idempotency_retention_hours
+        timestamp updated_at
     }
 
     BILLERS {
         uuid id PK
-        string code UK "ELECTROCO, AQUACO, TOPUPNET (NetCo not built)"
-        string name
-        string protocol "SYNC, SLOW_SYNC or ASYNC_CALLBACK"
+        varchar code UK
+        varchar name
+        varchar protocol
         boolean is_active
-        timestamp created_at
+        varchar fee_type
+        decimal fixed_fee
+        decimal percentage_rate
+        decimal min_fee
+        decimal commission_rate
     }
 
-    BILL_SERVICES {
+    BILLER_SERVICES {
         uuid id PK
         uuid biller_id FK
-        string name
-        json required_fields "list of field names, e.g. meter_number"
-        decimal min_amount "5.00, applies to total amount including fee"
-        decimal max_amount "10000.00, applies to total amount including fee"
-        string fee_type "FIXED, PERCENTAGE, TIERED"
-        decimal fee_value "fixed amount or percentage rate"
-        decimal min_fee "e.g. 1.00 for top-up"
+        varchar code
+        varchar name
+        json required_fields_schema
         boolean is_active
     }
 
-    BILL_SERVICE_FEE_TIERS {
+    FEE_TIERS {
         uuid id PK
-        uuid service_id FK
-        decimal up_to_amount "nullable = no upper limit, compared with bill_amount"
-        decimal fee_amount "2.00 up to 200, 4.00 above"
+        uuid biller_id FK
+        decimal min_amount
+        decimal max_amount
+        decimal fee_amount
     }
 
     PROMOTIONS {
         uuid id PK
         uuid biller_id FK
-        date start_date "inclusive, Cairo calendar day"
-        date end_date "inclusive, Cairo calendar day"
-        boolean is_active "waives service fee for this biller only"
-    }
-
-    SYSTEM_CONFIG {
-        string key PK "DAILY_LIMIT_BASIC, DAILY_LIMIT_VERIFIED, VELOCITY_MAX, VELOCITY_WINDOW_SECONDS, VELOCITY_BLOCK_MINUTES, AGENT_COMMISSION_RATE, IDEMPOTENCY_RETENTION, LIVE_BILLER_TIMEOUT_SECONDS, TOPUPNET_CALLBACK_TIMEOUT_SECONDS, REQUERY_SCHEDULE_MINUTES, ..."
-        string value
-        uuid updated_by FK "nullable"
-        timestamp updated_at
+        varchar name
+        date start_date
+        date end_date
+        boolean is_active
     }
 
     PAYMENTS {
         uuid id PK
-        string payment_reference UK "PayLink reference, sent to the biller and used in settlement files"
-        uuid idempotency_key_id FK "nullable"
-        string biller_reference "nullable, biller receipt reference, may be empty after a timeout"
-        uuid customer_id FK "the customer whose wallet is charged"
-        uuid agent_id FK "nullable, agents.user_id"
+        varchar reference UK
+        varchar idempotency_key UK
+        varchar request_hash
+        uuid customer_id FK
+        uuid agent_id FK
+        uuid biller_id FK
         uuid service_id FK
-        json input_values "meter number or phone number"
+        json customer_inputs
         decimal bill_amount
-        decimal fee_amount
-        decimal total_amount "bill_amount + fee_amount"
-        decimal commission_amount "0.00 if no agent or fee is 0, fixed at creation"
-        string state "Initiated, FundsHeld, SentToBiller, Completed, Failed, Unknown, Refunded, Rejected"
-        string failure_reason "nullable"
-        date cairo_date "Cairo calendar day of created_at, used for daily limit"
-        int retry_count "0 to 3 re-queries"
-        timestamp accepted_at "nullable, when TopUpNet replied Accepted"
-        timestamp unknown_at "nullable, re-queries are measured from here"
-        timestamp next_retry_at "nullable"
-        timestamp completed_at "nullable, used with Cairo day for daily totals"
+        decimal service_fee
+        decimal total_amount
+        decimal agent_commission
+        varchar state
+        varchar failure_reason
+        int retry_count
+        timestamp unknown_since
         timestamp created_at
         timestamp updated_at
     }
@@ -157,86 +133,77 @@ erDiagram
     PAYMENT_STATE_HISTORY {
         uuid id PK
         uuid payment_id FK
-        string from_state
-        string to_state
-        string reason
-        timestamp occurred_at
-    }
-
-    BILLER_EXCHANGES {
-        uuid id PK
-        uuid payment_id FK
-        string exchange_type "PAY_REQUEST, PAY_REPLY, REQUERY_REQUEST, REQUERY_REPLY"
-        string outcome "nullable, CONFIRMED, REFUSED, ACCEPTED, TIMEOUT"
-        string payload
-        timestamp occurred_at
+        varchar from_state
+        varchar to_state
+        varchar reason
+        varchar triggered_by
+        timestamp changed_at
     }
 
     BILLER_CALLBACKS {
         uuid id PK
         uuid payment_id FK
-        string external_event_id "indexed, NOT unique, so duplicates can be saved and logged"
-        string callback_status "success or failed"
-        string payload
-        string outcome "APPLIED, IGNORED_DUPLICATE, CONFLICT_FLAGGED"
-        boolean flagged_for_review "true on conflicting callback"
+        varchar external_ref
+        varchar raw_status
+        json payload_json
+        boolean is_duplicate
+        boolean is_conflicting
         timestamp received_at
+    }
+
+    REFUND_REQUESTS {
+        uuid id PK
+        uuid payment_id FK,UK
+        uuid requested_by FK
+        uuid reviewed_by FK
+        decimal refund_amount
+        decimal commission_clawback
+        varchar status
+        varchar reason
+        timestamp created_at
+        timestamp reviewed_at
     }
 
     NOTIFICATIONS {
         uuid id PK
+        uuid user_id FK
         uuid payment_id FK
-        string channel "SMS, EMAIL, PUSH"
-        string recipient
-        string message_type "PAYMENT_COMPLETED, PAYMENT_FAILED, PAYMENT_PROCESSING"
-        string status "PENDING, SENT, FAILED, UNDELIVERED"
-        int attempt_count "max 3 retries"
-        timestamp updated_at
+        varchar channel
+        text message_body
+        varchar status
+        int retry_count
+        timestamp last_attempt_at
+        timestamp created_at
     }
 
     SETTLEMENT_FILES {
         uuid id PK
         uuid biller_id FK
-        date settlement_date "UK together with biller_id"
-        string file_name "common layout: payment_reference, amount, status"
-        timestamp received_at
+        date settlement_date
+        varchar file_name
+        timestamp uploaded_at
     }
 
     RECONCILIATION_ITEMS {
         uuid id PK
         uuid settlement_file_id FK
-        uuid payment_id FK "nullable, null if missing in PayLink"
-        string payment_reference "matching key, from the file line or from PayLink"
-        decimal biller_amount "nullable"
-        string biller_status "nullable, status in the settlement file, e.g. received"
-        decimal paylink_amount "nullable"
-        string paylink_state "nullable"
-        string difference_type "MATCHED, MISSING_IN_PAYLINK, MISSING_IN_SETTLEMENT, STATE_MISMATCH, AMOUNT_MISMATCH"
-        string action_taken "NONE, RESOLVED_COMPLETED, RESOLVED_FAILED, FLAGGED_FOR_SUPPORT"
-        boolean reviewed "support review"
-        string review_note
-        timestamp created_at
-    }
-
-    REFUNDS {
-        uuid id PK
-        uuid payment_id FK "only for Completed payments, full refund only"
-        uuid requested_by FK "users.id"
-        uuid reviewed_by FK "nullable, support users.id"
-        decimal refund_amount "full total_amount (bill + fee)"
-        string status "PENDING_APPROVAL, APPROVED, REJECTED"
-        string reason
-        timestamp created_at
-        timestamp reviewed_at "nullable"
+        uuid payment_id FK
+        varchar payment_reference
+        decimal file_amount
+        varchar file_status
+        varchar paylink_state
+        varchar resolution_status
+        varchar notes
     }
 
     AUDIT_LOGS {
         uuid id PK
-        uuid actor_id FK "nullable, null = system action"
-        string action "e.g. FUNDS_HELD, FUNDS_CAPTURED, FEE_CREDITED, COMMISSION_CREDITED, HOLD_RELEASED, TOP_UP, REFUND_PAID, SUPPORT_BLOCK, CALLBACK_IGNORED_DUPLICATE"
-        string entity_type
+        varchar actor_id
+        varchar actor_role
+        varchar action
+        varchar entity_type
         uuid entity_id
-        string reason
-        string details "before/after values or amount"
-        timestamp occurred_at
+        varchar reason
+        json metadata_json
+        timestamp created_at
     }
