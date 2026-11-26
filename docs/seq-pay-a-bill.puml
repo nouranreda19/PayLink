@@ -1,0 +1,125 @@
+@startuml
+title PayLink - Pay a Bill
+
+actor Customer
+participant "PayLink App" as App
+participant "Payment Service" as Payment
+participant "Wallet Service" as Wallet
+participant "Ledger" as Ledger
+participant "Biller Integration" as BI
+participant "Biller" as Biller
+participant "Notification Service" as Notify
+
+Customer -> App: Confirm payment
+App -> Payment: Pay bill(details, idempotencyKey)
+
+Payment -> Payment: Check idempotency key
+
+alt Same key and same details
+    Payment --> App: Return original payment state
+else Same key, different details
+    Payment --> App: Reject request
+else New payment request
+    Payment -> Payment: Validate account, fraud,\nlimits and payment details
+
+    alt Validation fails
+        Payment --> App: Rejected(reason)
+    else Validation passes
+        Payment -> Wallet: Hold total amount\n(atomically)
+        
+        alt Insufficient funds
+            Wallet --> Payment: Hold failed
+            Payment --> App: Rejected
+        else Hold successful
+            Wallet -> Ledger: Record HOLD entry
+            Payment -> Payment: Initiated -> FundsHeld
+
+            Payment -> BI: Send payment request
+            Payment -> Payment: FundsHeld -> SentToBiller
+            BI -> Biller: Pay bill
+
+            alt ElectroCo / AquaCo: synchronous response
+                Biller --> BI: Success or failure
+
+                alt Biller confirms
+                    BI --> Payment: Success
+                    Payment -> Wallet: Capture held amount
+                    Wallet -> Ledger: Record CAPTURE
+                    Payment -> Payment: SentToBiller -> Completed
+                    opt Payment made by agent
+                        Payment -> Wallet: Credit 40% of actual fee
+                        Wallet -> Ledger: Record commission
+                    end
+                    Payment -> Notify: Send SMS + push
+                else Biller refuses
+                    BI --> Payment: Failure(reason)
+                    Payment -> Payment: SentToBiller -> Failed
+                    Payment -> Wallet: Release held amount
+                    Wallet -> Ledger: Record RELEASE
+                    Payment -> Payment: Failed -> Refunded
+                    Payment -> Notify: Send SMS + push\nwith failure reason
+                end
+
+            else TopUpNet: asynchronous response
+                Biller --> BI: Accepted
+                note over Payment,Biller
+                  Remains SentToBiller until callback.
+                  If no callback within 5 minutes,
+                  payment becomes Unknown.
+                end note
+
+                alt Callback success
+                    Biller -> BI: Success callback
+                    BI -> Payment: Process callback
+                    Payment -> Wallet: Capture held amount
+                    Wallet -> Ledger: Record CAPTURE
+                    Payment -> Payment: Completed
+                    opt Payment made by agent
+                        Payment -> Wallet: Credit commission
+                        Wallet -> Ledger: Record commission
+                    end
+                    Payment -> Notify: Send SMS + push
+                else Callback failure
+                    Biller -> BI: Failure callback
+                    BI -> Payment: Process callback
+                    Payment -> Payment: Failed
+                    Payment -> Wallet: Release held amount
+                    Wallet -> Ledger: Record RELEASE
+                    Payment -> Payment: Refunded
+                    Payment -> Notify: Send SMS + push\nwith failure reason
+                else No callback / live biller timeout
+                    Payment -> Payment: SentToBiller -> Unknown
+                    Payment --> App: Processing / Unknown
+                    note over Payment,Wallet
+                      Hold remains in place.
+                      Do not refund automatically.
+                      Re-query at 1, 5 and 15 minutes
+                      from entry into Unknown (max 3).
+                    end note
+
+                    alt Later confirmed
+                        BI --> Payment: Success
+                        Payment -> Wallet: Capture held amount
+                        Wallet -> Ledger: Record CAPTURE
+                        Payment -> Payment: Unknown -> Completed
+                        Payment -> Notify: Send SMS + push
+                    else Later refused / not received
+                        BI --> Payment: Failure
+                        Payment -> Payment: Unknown -> Failed
+                        Payment -> Wallet: Release held amount
+                        Wallet -> Ledger: Record RELEASE
+                        Payment -> Payment: Failed -> Refunded
+                        Payment -> Notify: Send SMS + push\nwith failure reason
+                    else Still unknown
+                        Payment --> App: Remains Unknown
+                        note over Payment,Wallet
+                          Keep funds held until
+                          biller confirmation or reconciliation.
+                        end note
+                    end
+                end
+            end
+        end
+    end
+end
+@enduml
